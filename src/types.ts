@@ -1,5 +1,4 @@
-import { z } from 'zod';
-import { ResourceContents } from '@modelcontextprotocol/sdk/types';
+import { ResourceContents } from '@modelcontextprotocol/sdk/types.js';
 
 export type FigmaFile = {
   key: string;
@@ -26,9 +25,19 @@ export type FigmaVariable = {
   valuesByMode: Record<string, any>;
 };
 
+export type FigmaResourceType =
+  | 'file' // Full file data
+  | 'nodes' // Specific nodes in a file
+  | 'images' // Image fills
+  | 'comments' // File comments
+  | 'versions' // File versions
+  | 'components' // Components in file
+  | 'styles' // Styles in file
+  | 'variables'; // Variables in file
+
 export type FigmaResource = {
   uri: string;
-  type: 'file' | 'component' | 'variable';
+  type: FigmaResourceType;
   name: string;
   description?: string;
   metadata?: Record<string, any>;

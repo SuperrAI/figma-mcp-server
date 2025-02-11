@@ -1,4 +1,4 @@
-import { McpError } from '@modelcontextprotocol/sdk/types';
+import { McpError } from '@modelcontextprotocol/sdk/types.js';
 
 export class ResourceNotFoundError extends McpError {
   constructor(message: string) {

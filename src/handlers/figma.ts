@@ -1,10 +1,10 @@
-import fetch from 'node-fetch';
+import { ResourceContents } from '@modelcontextprotocol/sdk/types.js';
 import debug from 'debug';
-import { ResourceContents } from '@modelcontextprotocol/sdk/types';
+import fetch from 'node-fetch';
 
-import { ResourceHandler, FigmaResource } from '../types.js';
+import { ResourceAccessDeniedError, ResourceNotFoundError } from '../errors.js';
 import { validateUri } from '../middleware/auth.js';
-import { ResourceNotFoundError, ResourceAccessDeniedError } from '../errors.js';
+import { FigmaResource, FigmaResourceType, ResourceHandler } from '../types.js';
 
 const log = debug('figma-mcp:figma-handler');
 
@@ -13,36 +13,134 @@ export class FigmaResourceHandler implements ResourceHandler {
 
   constructor(private token: string) {}
 
-  private async figmaRequest(path: string): Promise<any> {
+  public async figmaRequest(path: string): Promise<any> {
     const response = await fetch(`${this.baseUrl}${path}`, {
       headers: {
-        'X-Figma-Token': this.token
-      }
+        'X-Figma-Token': this.token,
+      },
     });
 
-    if (response.status === 404) {
-      throw new ResourceNotFoundError('Figma resource not found');
-    }
-
-    if (response.status === 403) {
-      throw new ResourceAccessDeniedError('Access to Figma resource denied');
-    }
-
     if (!response.ok) {
+      if (response.status === 404) {
+        throw new ResourceNotFoundError('Figma resource not found');
+      }
+      if (response.status === 403) {
+        throw new ResourceAccessDeniedError('Access to Figma resource denied');
+      }
       throw new Error(`Figma API error: ${response.statusText}`);
     }
 
     return response.json();
   }
 
+  async read(uri: string): Promise<ResourceContents[]> {
+    const { fileKey, resourceType, resourceId } = validateUri(uri);
+
+    // If no resource type specified, return full file
+    if (!resourceType) {
+      const file = await this.figmaRequest(`/files/${fileKey}`);
+      return [
+        {
+          uri,
+          mimeType: 'application/json',
+          text: JSON.stringify(file, null, 2),
+        },
+      ];
+    }
+
+    // Handle specific resource types
+    switch (resourceType) {
+      case 'nodes': {
+        const nodeIds = resourceId?.split(',') || [];
+        const nodes = await this.figmaRequest(`/files/${fileKey}/nodes?ids=${nodeIds.join(',')}`);
+        return [
+          {
+            uri,
+            mimeType: 'application/json',
+            text: JSON.stringify(nodes, null, 2),
+          },
+        ];
+      }
+
+      case 'images': {
+        const images = await this.figmaRequest(`/files/${fileKey}/images`);
+        return [
+          {
+            uri,
+            mimeType: 'application/json',
+            text: JSON.stringify(images, null, 2),
+          },
+        ];
+      }
+
+      case 'comments': {
+        const comments = await this.figmaRequest(`/files/${fileKey}/comments`);
+        return [
+          {
+            uri,
+            mimeType: 'application/json',
+            text: JSON.stringify(comments, null, 2),
+          },
+        ];
+      }
+
+      case 'versions': {
+        const versions = await this.figmaRequest(`/files/${fileKey}/versions`);
+        return [
+          {
+            uri,
+            mimeType: 'application/json',
+            text: JSON.stringify(versions, null, 2),
+          },
+        ];
+      }
+
+      case 'components': {
+        const components = await this.figmaRequest(`/files/${fileKey}/components`);
+        return [
+          {
+            uri,
+            mimeType: 'application/json',
+            text: JSON.stringify(components, null, 2),
+          },
+        ];
+      }
+
+      case 'styles': {
+        const styles = await this.figmaRequest(`/files/${fileKey}/styles`);
+        return [
+          {
+            uri,
+            mimeType: 'application/json',
+            text: JSON.stringify(styles, null, 2),
+          },
+        ];
+      }
+
+      case 'variables': {
+        const variables = await this.figmaRequest(`/files/${fileKey}/variables/local`);
+        return [
+          {
+            uri,
+            mimeType: 'application/json',
+            text: JSON.stringify(variables, null, 2),
+          },
+        ];
+      }
+
+      default:
+        throw new Error(`Unsupported resource type: ${resourceType}`);
+    }
+  }
+
   async list(): Promise<FigmaResource[]> {
-    log('Listing Figma resources');
-    const files = await this.figmaRequest('/files');
-    
+    // List accessible files
+    const files = await this.figmaRequest('/me/files');
+
     const resources: FigmaResource[] = [];
 
-    // Add file resources
     for (const file of files.files) {
+      // Add main file resource
       resources.push({
         uri: `figma:///file/${file.key}`,
         type: 'file',
@@ -50,74 +148,49 @@ export class FigmaResourceHandler implements ResourceHandler {
         metadata: {
           lastModified: file.lastModified,
           thumbnailUrl: file.thumbnailUrl,
-          version: file.version
-        }
+        },
       });
+
+      // Add sub-resources
+      const subResources: FigmaResourceType[] = ['images', 'comments', 'versions', 'components', 'styles', 'variables'];
+
+      for (const type of subResources) {
+        resources.push({
+          uri: `figma:///file/${file.key}/${type}`,
+          type,
+          name: `${file.name} - ${type}`,
+          metadata: {
+            fileKey: file.key,
+            fileName: file.name,
+          },
+        });
+      }
     }
 
     return resources;
   }
 
-  async read(uri: string): Promise<ResourceContents[]> {
-    const { type, fileKey, resourceId } = validateUri(uri);
-    log('Reading Figma resource:', { type, fileKey, resourceId });
-
-    switch (type) {
-      case 'file': {
-        const file = await this.figmaRequest(`/files/${fileKey}`);
-        return [{
-          uri,
-          mimeType: 'application/json',
-          text: JSON.stringify(file, null, 2)
-        }];
-      }
-
-      case 'component': {
-        if (!resourceId) throw new Error('Component ID required');
-        const component = await this.figmaRequest(`/files/${fileKey}/components/${resourceId}`);
-        return [{
-          uri,
-          mimeType: 'application/json',
-          text: JSON.stringify(component, null, 2)
-        }];
-      }
-
-      case 'variable': {
-        if (!resourceId) throw new Error('Variable ID required');
-        const variable = await this.figmaRequest(`/files/${fileKey}/variables/${resourceId}`);
-        return [{
-          uri,
-          mimeType: 'application/json',
-          text: JSON.stringify(variable, null, 2)
-        }];
-      }
-
-      default:
-        throw new Error(`Unsupported resource type: ${type}`);
-    }
-  }
-
   async search(query: string): Promise<FigmaResource[]> {
     log('Searching Figma resources:', query);
     const searchResults = await this.figmaRequest(`/search?query=${encodeURIComponent(query)}`);
-    
+
     return searchResults.files.map((file: any) => ({
       uri: `figma:///file/${file.key}`,
       type: 'file',
       name: file.name,
       metadata: {
         lastModified: file.lastModified,
-        thumbnailUrl: file.thumbnailUrl
-      }
+        thumbnailUrl: file.thumbnailUrl,
+      },
     }));
   }
 
   async watch(uri: string): Promise<void> {
-    const { type, fileKey } = validateUri(uri);
-    log('Setting up watch for Figma resource:', { type, fileKey });
+    const { resourceType, fileKey } = validateUri(uri);
+    log('Setting up watch for Figma resource:', { resourceType, fileKey });
 
     // For now, just verify the resource exists
-    if (type === 'file') {
+    if (resourceType === 'file') {
       await this.figmaRequest(`/files/${fileKey}`);
     }
     // Real-time updates would require WebSocket implementation

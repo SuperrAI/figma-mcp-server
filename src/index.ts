@@ -1,153 +1,143 @@
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
-import express from "express";
-import { createServer } from "http";
-import { z } from 'zod';
-import axios, { AxiosError } from 'axios';
+import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import dotenv from 'dotenv';
-import cors from 'cors';
+import fs from 'fs';
+import { z } from 'zod';
+
+import { FigmaResourceHandler } from './handlers/figma.js';
 
 // Load environment variables
 dotenv.config();
 
-class FigmaAPIServer {
-    private server: Server;
-    private figmaToken: string;
-    private baseURL: string = 'https://api.figma.com/v1';
-    private watchedResources: Map<string, { lastModified: string }> = new Map();
-    private expressApp: express.Application;
-    private httpServer: ReturnType<typeof createServer>;
+// Create a write stream for logging
+const logFile = fs.createWriteStream('/tmp/figma-mcp.log', { flags: 'a' });
 
-    constructor(figmaToken: string) {
-        if (!figmaToken) {
-            throw new Error('FIGMA_ACCESS_TOKEN is required but not provided');
-        }
-        
-        console.log(`Initializing server with token starting with: ${figmaToken.substring(0, 8)}...`);
-        
-        this.figmaToken = figmaToken;
-        this.server = new Server({
-            name: "figma-api-server",
-            version: "1.0.0",
-        }, {
-            capabilities: {
-                resources: {
-                    subscribe: true,
-                    listChanged: true,
-                    list: true,
-                    read: true,
-                    watch: true
-                },
-                commands: {},
-                events: {}
-            }
-        });
+// Custom logger function
+function log(message: string, ...args: any[]) {
+  const timestamp = new Date().toISOString();
+  const logMessage = `[${timestamp}] ${message} ${args.map((arg) => JSON.stringify(arg)).join(' ')}`;
 
-        this.expressApp = express();
-        this.httpServer = createServer(this.expressApp);
-        this.setupHandlers();
-        this.setupExpress();
-    }
+  // Write to file
+  logFile.write(logMessage + '\n');
 
-    private setupExpress() {
-        // Log all incoming requests
-        this.expressApp.use((req, res, next) => {
-            console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
-            next();
-        });
-
-        // CORS configuration
-        this.expressApp.use(cors({
-            origin: '*',
-            methods: ['GET', 'POST'],
-            allowedHeaders: ['Content-Type', 'X-Figma-Token'],
-            credentials: true
-        }));
-
-        // SSE endpoint
-        this.expressApp.get('/events', async (req, res) => {
-            console.log('New SSE connection attempt');
-            
-            res.writeHead(200, {
-                'Content-Type': 'text/event-stream',
-                'Cache-Control': 'no-cache',
-                'Connection': 'keep-alive'
-            });
-
-            // Create SSE transport for this connection
-            const sseTransport = new SSEServerTransport('/events', res);
-            await sseTransport.start();
-
-            const clientId = Date.now();
-            console.log(`SSE Client ${clientId} connected`);
-
-            // Handle incoming POST requests for this transport
-            this.expressApp.post('/events', async (postReq, postRes) => {
-                await sseTransport.handlePostMessage(postReq, postRes);
-            });
-
-            // Handle client disconnect
-            req.on('close', () => {
-                console.log(`SSE Client ${clientId} disconnected`);
-                sseTransport.close().catch(console.error);
-            });
-        });
-
-        // Health check endpoint
-        this.expressApp.get('/health', (req, res) => {
-            res.json({ status: 'healthy' });
-        });
-    }
-
-    private setupHandlers() {
-        // ... [Previous handlers implementation] ...
-    }
-
-    public async start() {
-        const port = process.env.PORT ? parseInt(process.env.PORT) : 3000;
-        const host = process.env.HOST || 'localhost';
-
-        try {
-            await new Promise<void>((resolve) => {
-                this.httpServer.listen(port, () => {
-                    console.log(`Server starting up...`);
-                    console.log(`HTTP server listening on http://${host}:${port}`);
-                    console.log(`SSE endpoint available at http://${host}:${port}/events`);
-                    resolve();
-                });
-            });
-
-            console.log('Server started successfully');
-
-        } catch (error) {
-            console.error('Error starting server:', error);
-            throw error;
-        }
-    }
+  // Also log to stderr for development
+  console.error(logMessage);
 }
 
-// Start the server
 async function main() {
-    try {
-        console.log('Starting Figma MCP server...');
-        console.log('Environment variables loaded:', {
-            FIGMA_ACCESS_TOKEN: process.env.FIGMA_ACCESS_TOKEN ? 'Present' : 'Missing',
-            PORT: process.env.PORT || 3000,
-            HOST: process.env.HOST || 'localhost',
-            NODE_ENV: process.env.NODE_ENV
-        });
+  try {
+    log('Starting Figma MCP server...');
 
-        const figmaToken = process.env.FIGMA_ACCESS_TOKEN;
-        if (!figmaToken) {
-            throw new Error('FIGMA_ACCESS_TOKEN environment variable is required');
-        }
-
-        const server = new FigmaAPIServer(figmaToken);
-        await server.start();
-    } catch (error) {
-        console.error('Fatal error starting server:', error);
-        process.exit(1);
+    const figmaToken = process.env.FIGMA_ACCESS_TOKEN || 'HARD_CODE_HERE'
+    if (!figmaToken) {
+      throw new Error('FIGMA_ACCESS_TOKEN environment variable is required');
     }
+
+    // Create handler
+    const handler = new FigmaResourceHandler(figmaToken);
+
+    // Create server instance
+    const server = new McpServer({
+      name: 'figma-readonly-server',
+      version: '1.0.0',
+      onError: (error) => {
+        log('Server error', {
+          name: error.name,
+          message: error.message,
+          stack: error.stack,
+        });
+      },
+    });
+
+    // Add tools using the higher-level API
+    server.tool(
+      'get-file',
+      {
+        fileKey: z.string().describe('The key of the Figma file'),
+      },
+      async ({ fileKey }) => {
+        log('Fetching file', fileKey);
+        const data = await handler.figmaRequest(`/files/${fileKey}`);
+        log('Got file data', { name: data.name, version: data.version });
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  name: data.name,
+                  key: fileKey,
+                  version: data.version,
+                  document: data.document,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+    );
+
+    server.tool(
+      'get-node',
+      {
+        fileKey: z.string().describe('The key of the Figma file'),
+        nodeId: z.string().describe('The ID of the node to get. Node ids have the format `<number>:<number>`'),
+      },
+      async ({ fileKey, nodeId }) => {
+        log('Fetching node', { fileKey, nodeId });
+        const data = await handler.figmaRequest(`/files/${fileKey}/nodes?ids=${nodeId}`);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(data, null, 2),
+            },
+          ],
+        };
+      }
+    );
+
+    // Add resources using ResourceTemplate
+    server.resource('file', new ResourceTemplate('figma:///file/{fileKey}', { list: undefined }), async (uri, { fileKey }) => {
+      log('Reading file resource', fileKey);
+      const data = await handler.figmaRequest(`/files/${fileKey}`);
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: 'application/json',
+            text: JSON.stringify(data, null, 2),
+          },
+        ],
+      };
+    });
+
+    // Graceful shutdown
+    process.on('SIGINT', async () => {
+      log('Shutting down server...');
+      await server.close();
+      // Close the log file
+      logFile.end();
+      process.exit(0);
+    });
+
+    // Connect using stdio transport
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+
+    log('Server started successfully');
+  } catch (error) {
+    log('Fatal error starting server:', error);
+    // Close the log file
+    logFile.end();
+    process.exit(1);
+  }
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  log('Unhandled error:', error);
+  logFile.end();
+  process.exit(1);
+});
