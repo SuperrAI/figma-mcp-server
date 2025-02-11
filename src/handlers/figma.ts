@@ -5,6 +5,7 @@ import fetch from 'node-fetch';
 import { ResourceAccessDeniedError, ResourceNotFoundError } from '../errors.js';
 import { validateUri } from '../middleware/auth.js';
 import { FigmaResource, FigmaResourceType, ResourceHandler } from '../types.js';
+import { transformFigmaDocument, transformFigmaNode } from '../utils/transform.js';
 
 const log = debug('figma-mcp:figma-handler');
 
@@ -36,14 +37,15 @@ export class FigmaResourceHandler implements ResourceHandler {
   async read(uri: string): Promise<ResourceContents[]> {
     const { fileKey, resourceType, resourceId } = validateUri(uri);
 
-    // If no resource type specified, return full file
+    // If no resource type specified, return transformed full file
     if (!resourceType) {
       const file = await this.figmaRequest(`/files/${fileKey}`);
+      const transformedFile = transformFigmaDocument(file);
       return [
         {
           uri,
           mimeType: 'application/json',
-          text: JSON.stringify(file, null, 2),
+          text: JSON.stringify(transformedFile, null, 2),
         },
       ];
     }
@@ -53,11 +55,20 @@ export class FigmaResourceHandler implements ResourceHandler {
       case 'nodes': {
         const nodeIds = resourceId?.split(',') || [];
         const nodes = await this.figmaRequest(`/files/${fileKey}/nodes?ids=${nodeIds.join(',')}`);
+        
+        // Transform each node in the response
+        const transformedNodes = Object.fromEntries(
+          Object.entries(nodes.nodes).map(([id, node]) => [
+            id,
+            transformFigmaNode(node)
+          ])
+        );
+        
         return [
           {
             uri,
             mimeType: 'application/json',
-            text: JSON.stringify(nodes, null, 2),
+            text: JSON.stringify({ nodes: transformedNodes }, null, 2),
           },
         ];
       }
